@@ -1,6 +1,7 @@
 import argparse
 import torch
 import os
+import re
 import json
 from tqdm import tqdm
 import shortuuid
@@ -14,6 +15,9 @@ from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
 import math
+
+
+
 
 
 def split_list(lst, n):
@@ -38,8 +42,21 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, index):
         line = self.questions[index]
-        image_file = line["image"]
+        # image_file = line["image"]
         qs = line["text"]
+        # ! object name in question can be accessed here.
+        pattern = r"Is there (.+?) in the"
+        object_name = re.search(pattern, qs).group(1)
+        try:
+            a_name, object_name = object_name.split(' ')[0], ', '.join(object_name.split(' ')[1:])
+        except Exception:
+            import pdb; pdb.set_trace()
+
+        p0_image_file = line['p0_image']
+        p1_image_file = line['p1_image']
+
+        qs = f'there is {a_name} {object_name} in this image. specify on the {object_name} you see and describe interactions of this object with other objects you see.'
+        
         if self.model_config.mm_use_im_start_end:
             qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
         else:
@@ -50,12 +67,14 @@ class CustomDataset(Dataset):
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-        image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
-        image_tensor = process_images([image], self.image_processor, self.model_config)[0]
+        p0_image = Image.open(os.path.join(self.image_folder, p0_image_file)).convert('RGB')
+        p1_image = Image.open(os.path.join(self.image_folder, p1_image_file)).convert('RGB')
+        image_tensor = process_images([p0_image, p1_image], self.image_processor, self.model_config)
 
         input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
+        input_ids = torch.stack((input_ids, input_ids), dim=0)
 
-        return input_ids, image_tensor, image.size
+        return input_ids, image_tensor, [p0_image.size, p1_image.size]
 
     def __len__(self):
         return len(self.questions)
@@ -63,9 +82,9 @@ class CustomDataset(Dataset):
 
 def collate_fn(batch):
     input_ids, image_tensors, image_sizes = zip(*batch)
-    input_ids = torch.stack(input_ids, dim=0)
-    image_tensors = torch.stack(image_tensors, dim=0)
-    return input_ids, image_tensors, image_sizes
+    # input_ids = torch.stack(input_ids, dim=0)
+    # image_tensors = torch.stack(image_tensors, dim=0)
+    return input_ids[0], image_tensors[0], image_sizes[0]
 
 
 # DataLoader
@@ -83,7 +102,7 @@ def eval_model(args):
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
-    questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
+    questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")][:args.question_num]
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
@@ -113,12 +132,15 @@ def eval_model(args):
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True)
 
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        # outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        p0_output = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        p1_output = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[1].strip()
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,
                                    "prompt": cur_prompt,
-                                   "text": outputs,
+                                   "p0_description": p0_output,
+                                   "p1_description": p1_output,
                                    "answer_id": ans_id,
                                    "model_id": model_name,
                                    "metadata": {}}) + "\n")
@@ -139,6 +161,7 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument('--question_num', type=int, default=3000)
     args = parser.parse_args()
 
     eval_model(args)
