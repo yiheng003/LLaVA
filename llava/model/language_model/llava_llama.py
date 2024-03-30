@@ -70,6 +70,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
+        # print("llava llama forward inputs_embeds None:", inputs_embeds == None)
         if inputs_embeds is None:
             (
                 input_ids,
@@ -87,7 +88,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 images,
                 image_sizes
             )
-
         return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -97,8 +97,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             labels=labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            output_hidden_states=True,
+            return_dict=return_dict,
+            image_pos=self.image_pos, 
+            patch_sim=self.patch_sim
         )
 
     @torch.no_grad()
@@ -113,7 +115,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         attention_mask = kwargs.pop("attention_mask", None)
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
-
         if images is not None:
             (
                 inputs,
@@ -121,7 +122,9 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 attention_mask,
                 _,
                 inputs_embeds,
-                _
+                _,
+                self.image_pos, 
+                self.patch_sim
             ) = self.prepare_inputs_labels_for_multimodal(
                 inputs,
                 position_ids,

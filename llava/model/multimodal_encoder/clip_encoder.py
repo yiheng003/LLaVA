@@ -2,7 +2,21 @@ import torch
 import torch.nn as nn
 
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+from torch import linalg as LA
 
+def patch_wise_similarity(tensor):
+    tensor = tensor.type(torch.float32)
+    tensor_n = LA.norm(tensor, dim=(0,2))[:, None]
+    tensor_norm = torch.matmul(tensor_n, tensor_n.transpose(0,1))
+    tensor_product = torch.matmul(tensor, tensor.transpose(1,2))
+    tensor_sim = torch.div(tensor_product, tensor_norm)
+
+    # # prevent overflow
+    # tensor_sim = tensor_sim.to(torch.float32)
+    # tensor_sim_sum = torch.sum(tensor_sim) / (tensor_sim.shape[-1]*tensor_sim.shape[-2])
+    
+    # return tensor_sim_sum
+    return tensor_sim
 
 class CLIPVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
@@ -53,8 +67,8 @@ class CLIPVisionTower(nn.Module):
         else:
             image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
-
-        return image_features
+            patch_sim = patch_wise_similarity(image_features)
+        return image_features, patch_sim
 
     @property
     def dummy_feature(self):

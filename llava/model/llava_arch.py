@@ -25,6 +25,7 @@ from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH
 
 from llava.mm_utils import get_anyres_image_grid_shape
 
+from torch import linalg as LA
 
 class LlavaMetaModel:
 
@@ -137,10 +138,36 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
+    def patch_wise_similarity(self, tensor):
+        tensor = tensor.type(torch.float32)
+        tensor_n = LA.norm(tensor, dim=(0,2))[:, None]
+        tensor_norm = torch.matmul(tensor_n, tensor_n.transpose(0,1))
+        tensor_product = torch.matmul(tensor, tensor.transpose(1,2))
+        tensor_sim = torch.div(tensor_product, tensor_norm)
+
+        # # prevent overflow
+        # tensor_sim = tensor_sim.to(torch.float32)
+        # tensor_sim_sum = torch.sum(tensor_sim) / (tensor_sim.shape[-1]*tensor_sim.shape[-2])
+        
+        # return tensor_sim_sum
+        return tensor_sim                           
+
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
+        image_features, patch_sim = self.get_model().get_vision_tower()(images)
         image_features = self.get_model().mm_projector(image_features)
-        return image_features
+
+        sim_after_proj = self.patch_wise_similarity(image_features)
+
+        patch_sim = patch_sim.to(torch.float32)
+        patch_sim = torch.sum(patch_sim) / (patch_sim.shape[-1]*patch_sim.shape[-2])
+        
+        sim_after_proj = sim_after_proj.to(torch.float32)
+        sim_after_proj = torch.sum(sim_after_proj) / (sim_after_proj.shape[-1]*sim_after_proj.shape[-2])
+        
+        print("patch_sim: ", patch_sim)
+        print("sim_after_proj: ", sim_after_proj)
+
+        return image_features, patch_sim
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
@@ -154,7 +181,7 @@ class LlavaMetaForCausalLM(ABC):
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
+            image_features, patch_sim = self.encode_images(concat_images)
             split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
             mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
@@ -199,7 +226,7 @@ class LlavaMetaForCausalLM(ABC):
             else:
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
-            image_features = self.encode_images(images)
+            image_features, patch_sim = self.encode_images(images)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
@@ -229,6 +256,7 @@ class LlavaMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
+        image_pos = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             if num_images == 0:
@@ -250,6 +278,7 @@ class LlavaMetaForCausalLM(ABC):
             split_sizes = [x.shape[0] for x in cur_labels_noim]
             cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            image_pos = cur_input_embeds_no_im[0].shape[0]
             cur_new_input_embeds = []
             cur_new_labels = []
 
@@ -321,7 +350,8 @@ class LlavaMetaForCausalLM(ABC):
         if _position_ids is None:
             position_ids = None
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
+        # print("llava arch image_pos: ", image_pos)
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, image_pos, patch_sim
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:
